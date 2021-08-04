@@ -1,0 +1,294 @@
+########################
+# NHIS, modified Sep 1 #
+########################
+library(survey)
+library(mitools)
+library(ggplot2)
+library(lodown)
+library(RSQLite)
+library(convey)
+library(srvyr)
+library(tidyverse)
+library(reshape2)
+
+#############################
+# step1: extract the subset #
+#############################
+# lodown( "nhis" , output_dir = file.path( path.expand( "~" ) , "NHIS" ) ) # this may take hours to download
+# #examine all available NHIS microdata files
+# nhis_cat <-
+#   get_catalog( "nhis" ,
+#                output_dir = file.path( path.expand( "~" ) , "NHIS" ) )
+# nhis_cat <- subset( nhis_cat , year == 1970 )
+# nhis_cat <- lodown( "nhis" , nhis_cat )
+# options( survey.lonely.psu = "adjust" )
+
+
+nhis_personsx_df <- readRDS( "personsx.rds" ) # 1970 NHIS
+sudovals <- read_fwf(file="6872sudovals.dat", col_types = "cccccc",
+                     fwf_widths(c(2,3,2,2,3,3))) # for variance calculation
+colnames(sudovals)<-c("yr","psunumr","weekcen","segnum","sudostr","sudopsu")
+sudovals<-sudovals[sudovals$yr=="70",]
+nhis_personsx_df$id<-1:dim(nhis_personsx_df)[1]
+varnames<-c("psunumr","weekcen","segnum","id","per52","per53","wtfa","per462","per464","per465","per466","per491")
+df<-nhis_personsx_df[,names(nhis_personsx_df) %in% varnames] # data with variables I want to use
+names(df)[names(df) =="per52"]<-"gender"
+names(df)[names(df) =="per53"]<-"age"
+names(df)[names(df) =="per462"]<-"smoke"
+names(df)[names(df) =="per464"]<-"smokeever"
+names(df)[names(df) =="per465"]<-"smokenow"
+names(df)[names(df) =="per466"]<-"howlongsincesmokeregular"
+names(df)[names(df) =="per491"]<-"agestartsmoke"
+df$gender<-as.factor(df$gender)
+table(df$gender,useNA = "ifany")
+levels(df$gender)<-c("male","female")
+table(df$gender,useNA = "ifany")
+df$smoke<-as.factor(df$smoke)
+table(df$smoke)
+levels(df$smoke)<-c("present","former","never","unknown if ever smoked")
+table(df$smoke,useNA = "ifany")
+table(df$smokenow,useNA = "ifany")
+df$smokenow<-as.factor(df$smokenow)
+levels(df$smokenow)<-c("yes","no","unknown")
+table(df$smokenow,useNA = "ifany")
+table(df$smokeever,useNA = "ifany")
+df$smokeever<-as.factor(df$smokeever)
+levels(df$smokeever)<-c("yes","no","unknown")
+table(df$smokeever,useNA = "ifany")
+
+df$bc<-NA # birth cohort
+df$bc[df$age>=20 &df$age<=29]<-"1941-1950"
+df$bc[df$age>=30 &df$age<=39]<-"1931-1940"
+df$bc[df$age>=40 &df$age<=49]<-"1921-1930"
+df$bc[df$age>=50 &df$age<=59]<-"1911-1920"
+
+
+################################
+# step2: create smoke interval #
+################################
+head(df)
+df1120<-subset(df,bc=="1911-1920")
+df2130<-subset(df,bc=="1921-1930")
+df3140<-subset(df,bc=="1931-1940")
+df4150<-subset(df,bc=="1941-1950")
+
+create_smoke.assess<-function(dat,assess.year){
+  dat$agestartsmoke[!is.na(dat$agestartsmoke)& dat$agestartsmoke==99]<-NA
+  dat$yr_start<-1970-(dat$age-dat$agestartsmoke)
+  dat$yr_start[!is.na(dat$agestartsmoke)& dat$agestartsmoke==98]<-0
+  dat$yr_start[!is.na(dat$howlongsincesmokeregular)& dat$howlongsincesmokeregular==98]<-0
+  dat$howlongsincesmokeregular[!is.na(dat$howlongsincesmokeregular)& dat$howlongsincesmokeregular==99]<-NA
+  dat$yr_end<-1970-dat$howlongsincesmokeregular  
+  dat$yr_end[!is.na(dat$howlongsincesmokeregular) & dat$howlongsincesmokeregular==0]<-dat$yr_end[!is.na(dat$howlongsincesmokeregular) & dat$howlongsincesmokeregular==0]-1
+  dat$yr_end[!is.na(dat$smokenow) & dat$smokenow=="yes"]<-1970
+  dat$yr_end[!is.na(dat$agestartsmoke)& dat$agestartsmoke==98]<-0
+  dat$yr_end[!is.na(dat$howlongsincesmokeregular)& dat$howlongsincesmokeregular==98]<-0
+  dat$yr_start[!is.na(dat$smokeever) & dat$smokeever=="no"]<-0
+  dat$yr_end[!is.na(dat$smokeever) & dat$smokeever=="no"]<-0
+  dat$smoke.assess<-1*(assess.year>= dat$yr_start & assess.year<=dat$yr_end)
+  print(c(mean(dat$smoke.assess[dat$gender=="male"],na.rm=TRUE), 
+          mean(dat$smoke.assess[dat$gender=="female"],na.rm=TRUE)))
+  print(table(dat$gender,useNA = "ifany"))
+  return(dat)
+}
+
+df2_1120<-create_smoke.assess(df1120,1940)
+df2_2130<-create_smoke.assess(df2130,1950)
+df2_3140<-create_smoke.assess(df3140,1960)
+df2_4150<-create_smoke.assess(df4150,1970)
+df2_sub<-rbind(df2_1120,df2_2130,df2_3140,df2_4150)
+n.smokeassessyear_nhis<-table(df2_sub[!is.na(df2_sub$smoke.assess),c("bc","gender")],useNA="ifany")
+n.smokeassessyear_nhis
+
+df2<-left_join(df,df2_sub,by=names(df))
+
+df2<-arrange(df2,psunumr,weekcen,segnum)
+df2$weekcen<-as.character(df2$weekcen)
+df2 <-left_join(df2,sudovals,by=c("psunumr","weekcen","segnum"))
+
+# create data frame with NHIS design information, using existing data frame of NHIS data 
+nhissvy <- svydesign(id=~sudopsu, strata=~sudostr, nest = TRUE, 
+                     weights=~wtfa, 
+                     data=df2)
+
+
+# birth cohort smoking prevalence at age 20-29 from NHIS datasets
+# at year 1940:1970
+smokrate.assessyear_nhis<-matrix(nrow=2,ncol=4)
+row.names(smokrate.assessyear_nhis)<-c("men","women")
+colnames(smokrate.assessyear_nhis)<-c("bc1911-1920","bc1921-1930","bc1931-1940","bc1941-1950")
+bc_levels<-c("1911-1920","1921-1930","1931-1940","1941-1950")
+se.smokeassessyear_nhis<-matrix(nrow=2,ncol=4)
+row.names(se.smokeassessyear_nhis)<-c("men","women")
+colnames(se.smokeassessyear_nhis)<-c("bc1911-1920","bc1921-1930","bc1931-1940","bc1941-1950")
+for(i in 1:4){
+  subgrp <- subset(nhissvy,(!is.na(smoke.assess) & gender=="male" & bc==bc_levels[i]))
+  smokrate.assessyear_nhis[1,i]<-svymean(~smoke.assess,design=subgrp)
+  se.smokeassessyear_nhis[1,i]<-SE(svymean(~smoke.assess,design=subgrp))
+  subgrp <- subset(nhissvy,(!is.na(smoke.assess) & gender=="female" & bc==bc_levels[i]))
+  smokrate.assessyear_nhis[2,i]<-svymean(~smoke.assess,design=subgrp)
+  se.smokeassessyear_nhis[2,i]<-SE(svymean(~smoke.assess,design=subgrp))
+}
+
+smokrate.assessyear_nhis<-smokrate.assessyear_nhis*100
+se.smokeassessyear_nhis<-se.smokeassessyear_nhis*100
+smokrate.assessyear_nhis
+se.smokeassessyear_nhis
+
+write.csv(smokrate.assessyear_nhis,"smokrate_assessyear_nhis.csv",row.names = FALSE)
+write.csv(se.smokeassessyear_nhis,"se_smokeassessyear_nhis.csv",row.names = FALSE)
+write.csv(n.smokeassessyear_nhis,"n_smokeassessyear_nhis.csv",row.names = FALSE)
+
+################################
+##### step3: IV for trend  #####
+################################
+library(ggplot2)
+library(lodown)
+library(RSQLite)
+library(convey)
+library(srvyr)
+library(xtable)
+smokrate.assessyear_nhis<-read.csv("smokrate_assessyear_nhis.csv",header = TRUE)
+se.smokeassessyear_nhis<-read.csv("se_smokeassessyear_nhis.csv",header = TRUE)
+n.smokeassessyear_nhis<-read.csv("n_smokeassessyear_nhis.csv",header = TRUE)
+smokrate.assessyear_nhis<-as.matrix(smokrate.assessyear_nhis)
+
+# birth cohort annual lung cancer mortality rate at age 55-64: ICD-8/9 162, ICD-10 C33-C34 from CDC wonder
+# at year 1975:2005
+# read from Compressed Mortality, 1975.txt, Compressed Mortality, 1985.txt, Compressed Mortality, 1995.txt, Compressed Mortality, 2005.txt
+lungmortalityrate5564<-matrix(nrow=2,ncol=4)
+row.names(lungmortalityrate5564)<-c("men","women")
+colnames(lungmortalityrate5564)<-c("bc1911-1920","bc1921-1930","bc1931-1940","bc1941-1950")
+lungmortalityrate5564[1,1]<-(35+18853)/9416000*100
+lungmortalityrate5564[2,1]<-(19+5774)/10629000*100
+lungmortalityrate5564[1,2]<-(24+24+264+11+73+2+22815)/10383963*100
+lungmortalityrate5564[2,2]<-(17+13+97+9+21+1+10667)/11751158*100
+lungmortalityrate5564[1,3]<-(10+13+147+3+60+18589)/10158673*100
+lungmortalityrate5564[2,3]<-(4+7+80+7+39+11238)/11161349*100
+lungmortalityrate5564[1,4]<-(7+3+61+4+26+18562)/14773087*100
+lungmortalityrate5564[2,4]<-(6+3+34+3+15+12639)/15868410*100 # 2005
+
+
+n.lungmortality5564<-matrix(nrow=2,ncol=4)
+row.names(n.lungmortality5564)<-c("men","women")
+colnames(n.lungmortality5564)<-c("bc1911-1920","bc1921-1930","bc1931-1940","bc1941-1950")
+n.lungmortality5564[1,1]<-9416000  # 1975
+n.lungmortality5564[2,1]<-10629000 # 1975
+n.lungmortality5564[1,2]<-10383963 # 1985
+n.lungmortality5564[2,2]<-11751158 # 1985
+n.lungmortality5564[1,3]<-10158673 # 1995
+n.lungmortality5564[2,3]<-11161349 # 1995
+n.lungmortality5564[1,4]<-14773087 # 2005
+n.lungmortality5564[2,4]<-15868410 # 2005
+
+
+
+p.df<-data.frame(percentage=c(smokrate.assessyear_nhis[1,],smokrate.assessyear_nhis[2,],
+                              lungmortalityrate5564[1,],lungmortalityrate5564[2,]),
+                 year=c(rep(c(1940,1950,1960,1970),2),rep(c(1975,1985,1995,2005),2)),
+                 gender=c(rep("men",4),rep("women",4),rep("men",4),rep("women",4)),
+                 variable=rep(c("(a) Smoke, yr20-29","(b) Lung cancer mortality, yr55-64"),each=8))
+
+
+p.df$variable<-factor(p.df$variable,c("(a) Smoke, yr20-29","(b) Lung cancer mortality, yr55-64"))
+p.df$year<-as.factor(p.df$year)
+p<-ggplot(data=p.df,aes(x=year,y=percentage,group=gender))+
+  geom_point(aes(shape=gender))+geom_line(aes(linetype=gender))+
+  ylim(c(0,70))+theme_bw() +facet_wrap(.~variable,scales = "free")+
+  scale_y_continuous(limits = c(0,NA))
+p
+
+
+# IV for trend Two sample Wald estimator
+ivt.wald<-function(t1,t2){
+  delta_D<-(smokrate.assessyear_nhis[1,t2]- smokrate.assessyear_nhis[2,t2]-smokrate.assessyear_nhis[1,t1]+smokrate.assessyear_nhis[2,t1])/100
+  beta<-(lungmortalityrate5564[1,t2]- lungmortalityrate5564[2,t2]-
+           lungmortalityrate5564[1,t1]+lungmortalityrate5564[2,t1] )/
+    (smokrate.assessyear_nhis[1,t2]- smokrate.assessyear_nhis[2,t2]-smokrate.assessyear_nhis[1,t1]+smokrate.assessyear_nhis[2,t1])
+  smokrate2029.se<-se.smokeassessyear_nhis/100
+  se_delta_D<-sqrt((smokrate2029.se[1,t2])^2+(smokrate2029.se[1,t1])^2 +(smokrate2029.se[2,t2])^2+(smokrate2029.se[2,t1])^2)
+  f.stat<-(delta_D/se_delta_D)^2
+  f.stat
+  lungmortalityrate5564.se<-sqrt(lungmortalityrate5564/100/n.lungmortality5564)
+  wald.var<-((lungmortalityrate5564.se[1,t2]^2+lungmortalityrate5564.se[2,t2]^2+
+                lungmortalityrate5564.se[1,t1]^2+lungmortalityrate5564.se[2,t1]^2)+
+               beta^2*(smokrate2029.se[1,t2]^2+smokrate2029.se[2,t2]^2+smokrate2029.se[1,t1]^2+smokrate2029.se[2,t1]^2))/
+    delta_D^2
+  return(list(beta=beta, se=sqrt(wald.var),delta_D=delta_D))
+}
+
+# standard IV
+(lungmortalityrate5564[2,]-lungmortalityrate5564[1,])/(smokrate.assessyear_nhis[2,]-smokrate.assessyear_nhis[1,])
+
+xtable(as.data.frame(n.lungmortality5564),digits=0)
+
+ivt_res<-matrix(data=NA, nrow=2,ncol=3)
+colnames(ivt_res)<-c("bc1911-1930","bc1921-1940","bc1931-1950")
+rownames(ivt_res)<-c("delta_D","lung")
+for(i in 1:3){
+  tmp<-ivt.wald(i,i+1)
+  ivt_res[1,i]<-round(tmp$delta_D*100,3)
+  ivt_res[2,i]<-paste0(round(tmp$beta*100,3)," (",round(tmp$se*100,3),")")
+}
+ivt_res
+xtable(as.data.frame(ivt_res),digits=0)
+xtable(as.data.frame(t(n.smokeassessyear_nhis)),digits=0)
+
+################################
+# Step 4: sensitivity analysis #
+################################
+# IV for trend Two sample Wald estimator, Sensitivity Analysis
+ivt.wald.sa<-function(t1,t2,Delta){
+  delta_D<-(smokrate.assessyear_nhis[1,t2]- smokrate.assessyear_nhis[2,t2]-smokrate.assessyear_nhis[1,t1]+smokrate.assessyear_nhis[2,t1])/100
+  beta<-(lungmortalityrate5564[1,t2]- lungmortalityrate5564[2,t2]-
+           lungmortalityrate5564[1,t1]+lungmortalityrate5564[2,t1] - Delta*(smokrate.assessyear_nhis[1,t2]- smokrate.assessyear_nhis[2,t2]) )/
+    (smokrate.assessyear_nhis[1,t2]- smokrate.assessyear_nhis[2,t2]-smokrate.assessyear_nhis[1,t1]+smokrate.assessyear_nhis[2,t1])
+  smokrate2029.se<-se.smokeassessyear_nhis/100
+  se_delta_D<-sqrt((smokrate2029.se[1,t2])^2+(smokrate2029.se[1,t1])^2 +(smokrate2029.se[2,t2])^2+(smokrate2029.se[2,t1])^2)
+  lungmortalityrate5564.se<-sqrt(lungmortalityrate5564/100/n.lungmortality5564)
+  wald.var<-((lungmortalityrate5564.se[1,t2]^2+lungmortalityrate5564.se[2,t2]^2+
+                lungmortalityrate5564.se[1,t1]^2+lungmortalityrate5564.se[2,t1]^2)+
+               ((beta+Delta)^2*smokrate2029.se[1,t2]^2+(beta+Delta)^2*smokrate2029.se[2,t2]^2+beta^2*smokrate2029.se[1,t1]^2+beta^2*smokrate2029.se[2,t1]^2))/
+    delta_D^2
+  return(list(beta=beta, se=sqrt(wald.var),delta_D=delta_D,CL=beta-1.96*sqrt(wald.var),UL=beta+1.96*sqrt(wald.var)))
+}
+
+sa.cl<-function(x,t1,t2){
+  res<-ivt.wald.sa(t1=t1,t2=t2,Delta=x)$CL
+  return(res)
+}
+sa.ul<-function(x,t1,t2){
+  res<-ivt.wald.sa(t1=t1,t2=t2,Delta=x)$UL
+  return(res)
+}
+Delta_seq<-seq(0,0.003,length.out=20)
+p_sa<-data.frame(Delta=Delta_seq,lower.CI=ivt.wald.sa(1,2,Delta_seq)$CL, 
+                 upper.CI=ivt.wald.sa(1,2,Delta_seq)$UL)
+mp_sa<-melt(p_sa,id="Delta")
+names(mp_sa)<-c("Delta","type","CI")
+mp_sa$type<-relevel(mp_sa$type,ref="upper.CI")
+ggplot(data=mp_sa,aes(Delta,CI,group=type,color=type))+geom_line()+ylab("confidence interval")+
+  theme_bw()+xlab(expression(Delta))+ theme(legend.title = element_blank())+
+  geom_hline(yintercept = 0,linetype = "dashed")
+ggsave("sa12.pdf",width = 5,height=3)
+
+
+p_sa<-data.frame(Delta=Delta_seq,lower.CI=ivt.wald.sa(2,3,Delta_seq)$CL, 
+                 upper.CI=ivt.wald.sa(2,3,Delta_seq)$UL)
+mp_sa<-melt(p_sa,id="Delta")
+names(mp_sa)<-c("Delta","type","CI")
+mp_sa$type<-relevel(mp_sa$type,ref="upper.CI")
+ggplot(data=mp_sa,aes(Delta,CI,group=type,color=type))+geom_line()+ylab("confidence interval")+
+  theme_bw()+xlab(expression(Delta))+ theme(legend.title = element_blank())+
+  geom_hline(yintercept = 0,linetype = "dashed")
+ggsave("sa23.pdf",width = 5,height=3)
+
+p_sa<-data.frame(Delta=Delta_seq,lower.CI=ivt.wald.sa(3,4,Delta_seq)$CL, 
+                 upper.CI=ivt.wald.sa(3,4,Delta_seq)$UL)
+mp_sa<-melt(p_sa,id="Delta")
+names(mp_sa)<-c("Delta","type","CI")
+mp_sa$type<-relevel(mp_sa$type,ref="upper.CI")
+ggplot(data=mp_sa,aes(Delta,CI,group=type,color=type))+geom_line()+ylab("confidence interval")+
+  theme_bw()+xlab(expression(Delta))+ theme(legend.title = element_blank())+
+  geom_hline(yintercept = 0,linetype = "dashed")
+ggsave("sa34.pdf",width = 5,height=3)

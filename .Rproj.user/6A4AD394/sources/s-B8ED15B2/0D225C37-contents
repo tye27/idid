@@ -1,0 +1,515 @@
+# Instrumented DID: simulations #
+# modified Aug 3, 2022 #
+##### author: Ting Ye #####
+library(ivpack)
+library(ggplot2)
+library(rootSolve)
+library(truncnorm)
+
+# simulate data for case 1 and case 2
+data_gen<-function(case,n){
+  if(case=="case1"){  
+    z<-rbinom(n,1,0.5)
+    u0<-rtruncnorm(n,a=-1,b=1,mean = 0,sd = 1)
+    u1<-1+rtruncnorm(n,a=-1,b=1,mean = 0,sd = 1)
+    x<-rnorm(n)
+    pi_d0<-(z+1)/8*u0+0.5
+    pi_d1<-(z+1)/8*u1+0.5
+    d0<-rbinom(n,1,pi_d0)
+    d1<-rbinom(n,1,pi_d1)
+    y0<-(1+x)*d0+2+2*u0+z+x+rnorm(n) # observed outcome at t=0
+    y1<-(1+x)*d1+2+2*u1+z+x+rnorm(n) # observed outcome at t=1
+  }else if (case=="case2"){
+    x<-rnorm(n)
+    z<-rbinom(n,1,exp(x/2)/(1+exp(x/2)))
+    u0<-rnorm(n,0,1)
+    u1<-rnorm(n,1,1)
+    pi_d0<-(-1)*z*u0-0.5+1.5*u0
+    pi_d1<-(-1)*z*u1-0.5+1.5*u1
+    d0<-rbinom(n,1,exp(pi_d0)/(1+exp(pi_d0)))
+    d1<-rbinom(n,1,exp(pi_d1)/(1+exp(pi_d1)))
+    y0<-(1+x)*d0+2+2*u0+z+x+rnorm(n) # observed outcome at t=0
+    y1<-(1+x)*d1+2+2*u1+z+x+rnorm(n) # observed outcome at t=1
+  }
+  df_full<-data.frame(z,x,d0,d1,y0,y1)
+  t<-rbinom(n,1,.5)
+  df_full$t<-t
+  df0<-df_full[df_full$t==0,c(1,2,3,5,7)]
+  df1<-df_full[df_full$t==1,c(1,2,4,6,7)]
+  names(df0)<-c("z","x","d","y","t")
+  names(df1)<-c("z","x","d","y","t")
+  df<-rbind(df0,df1)  
+  return(df)
+}
+
+# one-sample iDID Wald estimator 
+idid_Wald<-function(df){
+  n<-dim(df)[1]
+  delta_D<-(mean(df$d[df$t==1 & df$z==1],na.rm=TRUE)- mean(df$d[df$t==0 & df$z==1],na.rm=TRUE) )-
+    (mean(df$d[df$t==1 & df$z==0],na.rm=TRUE)- mean(df$d[df$t==0 & df$z==0],na.rm=TRUE))
+  delta_Y<-(mean(df$y[df$t==1 & df$z==1],na.rm=TRUE)- mean(df$y[df$t==0 & df$z==1],na.rm=TRUE) )-
+    (mean(df$y[df$t==1 & df$z==0],na.rm=TRUE)- mean(df$y[df$t==0 & df$z==0],na.rm=TRUE))
+  beta.est<-delta_Y/delta_D
+  tmp<-numeric(4)
+  i<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      tmp[i]<-var(df$y[df$t==t& df$z==z]-beta.est*df$d[df$t==t& df$z==z],na.rm = TRUE)/
+        (length(which(df$t==t & df$z==z))/n)
+      i<-i+1
+    }
+  }
+  beta.se<-sqrt(sum(tmp)/delta_D^2)/sqrt(n)
+  list(beta.est=beta.est,beta.se=beta.se)
+}
+
+# percentile bootstrap for constructing confidence intervals
+bootstrap_sd<-function(df,n_boot=2,npar,cluster,method=c("wald","semi"),
+                       working.model=c("constant","linear"),func, alpha=.05){
+  if(cluster==TRUE){
+    if(!"id" %in% names(df)){
+      stop("Need a variable named ``id'' for cluster bootstrap.")
+    }
+    id_unique<-unique(df$id)
+    boot_res<-matrix(nrow=n_boot,ncol=npar)
+    for(i in 1:n_boot){
+      id_boot<-sample(id_unique,length(id_unique),replace = TRUE)
+      df_boot<-df[df$id %in% id_boot,]
+      if(method=="wald"){
+        boot_res[i,]<-idid_Wald(df_boot)$beta.est
+      }else if (method=="semi"){
+        V_boot<-matrix(data=1,nrow = dim(df_boot)[1],ncol=1)
+        if (working.model=="linear")  V_boot<-cbind(V_boot,as.matrix(df_boot$x,nrow=dim(df_boot)[1],ncol=1))
+        boot_res[i,]<-func(df_boot,V_boot)      
+        }
+    }
+  }else{
+    boot_res<-matrix(nrow=n_boot,ncol=npar)
+    for(i in 1:n_boot){
+      id_boot<-sample.int(n=dim(df)[1],replace = TRUE)
+      df_boot<-df[id_boot,]
+      if(method=="wald"){
+        boot_res[i,]<-idid_Wald(df_boot)$beta.est
+      }else if (method=="semi"){
+        V_boot<-matrix(data=1,nrow = dim(df_boot)[1],ncol=1)
+        if (working.model=="linear")  V_boot<-cbind(V_boot,as.matrix(df_boot$x,nrow=dim(df_boot)[1],ncol=1))
+        boot_res[i,]<-func(df_boot,V_boot)      
+      }
+    }
+  }
+  boot_se<-numeric(2)
+  boot_se<-apply(boot_res,2,function(x){(quantile(x,probs = 1-alpha/2)-quantile(x,probs = alpha/2))/2/qnorm(alpha/2,lower.tail = FALSE)
+    })
+  boot_se
+}
+
+# the efficient influence function for the iDID semiparametric estimator
+IF<-function(psi,df,V,delta_Y, delta_D, pi, y_fit, d_fit){
+    res<-as.vector(delta_Y/delta_D - (V %*% psi) + 
+                     (2*df$z-1)*(2*df$t-1)/pi/delta_D*( df$y-y_fit- delta_Y/delta_D*(df$d-d_fit) ))* V
+    res_mean<-apply(res,2,mean)  
+  return(res_mean)
+}
+
+
+idid_semi_forsimu<-function(df,func){
+  V<-matrix(data=1,nrow = dim(df)[1],ncol=1)
+  res0_IF<-func(df,V)
+  res0_se<-bootstrap_sd(df,npar=1,cluster=FALSE,method="semi",working.model = "constant",func = func)
+  V<-cbind(V,as.matrix(df$x,nrow=dim(df)[1],ncol=1))
+  res1_IF<-func(df,V)
+  res1_se<-bootstrap_sd(df,npar=2,cluster=FALSE,method="semi",working.model = "linear",func = func)
+  return(list(beta.est0=res0_IF, beta.se0=res0_se, psi.est1=res1_IF, psi.se1=res1_se))
+}
+
+idid_semi_mis_pi<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*x,data=df)
+  fit_d<-lm(d~as.factor(t)*as.factor(z)*x,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~exp(x/2)+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~exp(x/2),data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_mis_muD<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*x,data=df)
+  fit_d<-glm(d~as.factor(t)*as.factor(z)*x,family = binomial,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~x+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~x,data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_mis_muY<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*exp(x/2),data=df)
+  fit_d<-lm(d~as.factor(t)*as.factor(z)*x,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~x+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~x,data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_no_mis<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*x,data=df)
+  fit_d<-lm(d~as.factor(t)*as.factor(z)*x,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~x+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~x,data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_mis_pi_muD<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*x,data=df)
+  fit_d<-glm(d~as.factor(t)*as.factor(z)*x,family = binomial,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~exp(x/2)+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~exp(x/2),data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_mis_pi_muY<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*exp(x/2),data=df)
+  fit_d<-lm(d~as.factor(t)*as.factor(z)*x,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~exp(x/2)+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~exp(x/2),data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_mis_muD_muY<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*exp(x/2),data=df)
+  fit_d<-glm(d~as.factor(t)*as.factor(z)*x,family = binomial,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~x+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~x,data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+idid_semi_mis_all<-function(df,V){
+  fit_y<-lm(y~as.factor(t)*as.factor(z)*exp(x/2),data=df)
+  fit_d<-glm(d~as.factor(t)*as.factor(z)*x,family = binomial,data=df)
+  mu_y_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  mu_d_fit<-matrix(nrow=dim(df)[1], ncol=4)
+  df_tmp<-df
+  b<-1
+  for(t in 0:1){
+    for(z in 0:1){
+      df_tmp$t<-as.factor(t)
+      df_tmp$z<-as.factor(z)
+      mu_y_fit[,b]<-predict(fit_y,df_tmp)
+      mu_d_fit[,b]<-predict(fit_d,df_tmp)
+      b<-b+1
+    }
+  }
+  delta_Y<-(mu_y_fit[,1]-mu_y_fit[,2]-mu_y_fit[,3]+mu_y_fit[,4])
+  delta_D<-(mu_d_fit[,1]-mu_d_fit[,2]-mu_d_fit[,3]+mu_d_fit[,4])
+  pi_z<-glm(z~exp(x/2)+t,data=df,family = "binomial")$fitted.values
+  pi_t<-glm(t~exp(x/2),data=df,family = "binomial")$fitted.values
+  pi<-(pi_z*pi_t)*(df$z==1 & df$t==1)+ 
+    ((1-pi_z)*pi_t)*(df$z==0 & df$t==1)+ 
+    (pi_z*(1-pi_t))*(df$z==1& df$t==0)+ 
+    ((1-pi_z)*(1-pi_t))*(df$z==0& df$t==0)
+  y_fit<-fit_y$fitted.values
+  d_fit<-fit_d$fitted.values
+  res<-multiroot(IF,start=rep(0,dim(V)[2]), df=df,  V=V, delta_Y=delta_Y,
+                 delta_D=delta_D, pi=pi, y_fit=y_fit, d_fit=d_fit)$root
+  return(res)
+}
+
+plot_trend<-function(df){
+  #plot the trend in y0
+  df$z<-as.factor(df$z)
+  p<-ggplot(data=df,aes(as.factor(t),y0,group=z,colour=z))
+  p+stat_summary(aes(as.factor(t),y0,group=z),fun.y=mean,geom="line")
+  #plot the trend in d
+  p<-ggplot(data=df,aes(as.factor(t),d,group=z,colour=z))
+  p+stat_summary(aes(as.factor(t),d,group=z),fun.y=mean,geom="line")
+}
+
+F_test<-function(df){
+  df$ind<-1*(df$z==1 & df$t==1)
+  fit1<-lm(ind~t+z,data=df)
+  fit2<-lm(d~fit1$residuals,data=df)
+  F_statistic<-anova(fit2)$F[1]
+  return(F_statistic)
+}
+
+# run simulations for Section 6
+simu<-function(case=c("case1","case2"),n=1e5,n_rep=1e3){
+  methods<-c("ols","IV","time IV", "IVT Wald", 
+             "IVT Semi (no mis)","IVT Semi linear0 (no mis)","IVT Semi linear1 (no mis)", 
+             "IVT Semi (mis pi)","IVT Semi linear0 (mis pi)","IVT Semi linear1 (mis pi)", 
+             "IVT Semi (mis mu_D)","IVT Semi linear0 (mis mu_D)","IVT Semi linear1 (mis mu_D)", 
+             "IVT Semi (mis mu_Y)","IVT Semi linear0 (mis mu_Y)","IVT Semi linear1 (mis mu_Y)", 
+             "IVT Semi (mis pi mu_D)","IVT Semi linear0 (mis pi mu_D)","IVT Semi linear1 (mis pi mu_D)",
+             "IVT Semi (mis pi mu_Y)","IVT Semi linear0 (mis pi mu_Y)","IVT Semi linear1 (mis pi mu_Y)",
+             "IVT Semi (mis mu_D mu_Y)","IVT Semi linear0 (mis mu_D mu_Y)","IVT Semi linear1 (mis mu_D mu_Y)",
+             "IVT Semi (mis all)","IVT Semi linear0 (mis all)","IVT Semi linear1 (mis all)"
+  )
+  res<-matrix(data=NA,nrow=n_rep,ncol=length(methods))
+  res_CP<-matrix(data=NA,nrow=n_rep,ncol=length(methods))
+  res_se<-matrix(data=NA,nrow=n_rep,ncol=length(methods))
+  measure<-matrix(data=NA,nrow=n_rep,ncol = 3)
+  colnames(res)<-methods
+  alpha<-0.05
+  c_alpha<-qnorm(alpha/2,lower.tail = FALSE)
+  for(k in 1:n_rep){  
+    set.seed(k)
+    print(k)
+    df<-data_gen(case=case,n=1e5)
+    fit1<-lm(y~d,data=df)
+    res[k,1]<-fit1$coefficients[2]
+    res_se[k,1]<-summary(fit1)$coefficients[2,2]
+    res_CP[k,1]<-1*(1> res[k,1]-c_alpha*res_se[k,1] & 1< res[k,1]+ c_alpha*res_se[k,1])
+    #2SLS
+    fit2<-ivreg(y~d|z,data=df)
+    res[k,2]<-fit2$coefficients[2]
+    res_se[k,2]<-summary(fit2)$coefficients[2,2]
+    res_CP[k,2]<-1*(1> res[k,2]-c_alpha*res_se[k,2] & 1< res[k,2]+ c_alpha*res_se[k,2])
+    #calendar time IV
+    fit3<-ivreg(y~d|t,data=df)
+    res[k,3]<-fit3$coefficients[2]
+    res_se[k,3]<-summary(fit3)$coefficients[2,2]
+    res_CP[k,3]<-1*(1> res[k,3]-c_alpha*res_se[k,3] & 1< res[k,3]+ c_alpha*res_se[k,3])
+    # IVT wald
+    fit4<-idid_Wald(df)
+    res[k,4]<-fit4$beta.est
+    res_se[k,4]<-fit4$beta.se
+    res_CP[k,4]<-1*(1> res[k,4]- c_alpha*res_se[k,4] &1< res[k,4]+ c_alpha*res_se[k,4] )
+    # IVT semi, no mis
+    fit5<-idid_semi_forsimu(df,idid_semi_no_mis)
+    res[k,5]<-fit5$beta.est0
+    res[k,6:7]<-fit5$psi.est1
+    res_se[k,5]<-fit5$beta.se0
+    res_se[k,6:7]<-fit5$psi.se1
+    res_CP[k,5]<-1*(1> res[k,5]- c_alpha*res_se[k,5] &1< res[k,5]+ c_alpha*res_se[k,5] )
+    res_CP[k,6]<-1*(1> res[k,6]- c_alpha*res_se[k,6] &1< res[k,6]+ c_alpha*res_se[k,6] )
+    res_CP[k,7]<-1*(1> res[k,7]- c_alpha*res_se[k,7] &1< res[k,7]+ c_alpha*res_se[k,7] )
+    # IVT semi, mis pi
+    fit6<-idid_semi_forsimu(df,idid_semi_mis_pi)
+    res[k,8]<-fit6$beta.est0
+    res[k,9:10]<-fit6$psi.est1
+    res_se[k,8]<-fit6$beta.se0
+    res_se[k,9:10]<-fit6$psi.se1
+    res_CP[k,8]<-1*(1> res[k,8]- c_alpha*res_se[k,8] &1< res[k,8]+ c_alpha*res_se[k,8] )
+    res_CP[k,9]<-1*(1> res[k,9]- c_alpha*res_se[k,9] &1< res[k,9]+ c_alpha*res_se[k,9] )
+    res_CP[k,10]<-1*(1> res[k,10]- c_alpha*res_se[k,10] &1< res[k,10]+ c_alpha*res_se[k,10] )
+    # IVT semi, mis mu_D
+    fit<-idid_semi_forsimu(df,idid_semi_mis_muD)
+    res[k,11]<-fit$beta.est0
+    res[k,12:13]<-fit$psi.est1
+    res_se[k,11]<-fit$beta.se0
+    res_se[k,12:13]<-fit$psi.se1
+    res_CP[k,11]<-1*(1> res[k,11]- c_alpha*res_se[k,11] &1< res[k,11]+ c_alpha*res_se[k,11] )
+    res_CP[k,12]<-1*(1> res[k,12]- c_alpha*res_se[k,12] &1< res[k,12]+ c_alpha*res_se[k,12] )
+    res_CP[k,13]<-1*(1> res[k,13]- c_alpha*res_se[k,13] &1< res[k,13]+ c_alpha*res_se[k,13] )
+    # IVT semi, mis mu_Y
+    fit<-idid_semi_forsimu(df,idid_semi_mis_muY)
+    res[k,14]<-fit$beta.est0
+    res[k,15:16]<-fit$psi.est1
+    res_se[k,14]<-fit$beta.se0
+    res_se[k,15:16]<-fit$psi.se1
+    res_CP[k,14]<-1*(1> res[k,14]- c_alpha*res_se[k,14] &1< res[k,14]+ c_alpha*res_se[k,14] )
+    res_CP[k,15]<-1*(1> res[k,15]- c_alpha*res_se[k,15] &1< res[k,15]+ c_alpha*res_se[k,15] )
+    res_CP[k,16]<-1*(1> res[k,16]- c_alpha*res_se[k,16] &1< res[k,16]+ c_alpha*res_se[k,16] )
+    # IVT semi, mis pi mu_D
+    fit<-idid_semi_forsimu(df,idid_semi_mis_pi_muD)
+    res[k,17]<-fit$beta.est0
+    res[k,18:19]<-fit$psi.est1
+    res_se[k,17]<-fit$beta.se0
+    res_se[k,18:19]<-fit$psi.se1
+    res_CP[k,17]<-1*(1> res[k,17]- c_alpha*res_se[k,17] &1< res[k,17]+ c_alpha*res_se[k,17] )
+    res_CP[k,18]<-1*(1> res[k,18]- c_alpha*res_se[k,18] &1< res[k,18]+ c_alpha*res_se[k,18] )
+    res_CP[k,19]<-1*(1> res[k,19]- c_alpha*res_se[k,19] &1< res[k,19]+ c_alpha*res_se[k,19] )
+    # IVT semi, mis pi mu_Y
+    fit<-idid_semi_forsimu(df,idid_semi_mis_pi_muY)
+    res[k,20]<-fit$beta.est0
+    res[k,21:22]<-fit$psi.est1
+    res_se[k,20]<-fit$beta.se0
+    res_se[k,21:22]<-fit$psi.se1
+    res_CP[k,20]<-1*(1> res[k,20]- c_alpha*res_se[k,20] &1< res[k,20]+ c_alpha*res_se[k,20] )
+    res_CP[k,21]<-1*(1> res[k,21]- c_alpha*res_se[k,21] &1< res[k,21]+ c_alpha*res_se[k,21] )
+    res_CP[k,22]<-1*(1> res[k,22]- c_alpha*res_se[k,22] &1< res[k,22]+ c_alpha*res_se[k,22] )
+    # IVT semi, mis mu_D mu_Y
+    fit<-idid_semi_forsimu(df,idid_semi_mis_muD_muY)
+    res[k,23]<-fit$beta.est0
+    res[k,24:25]<-fit$psi.est1
+    res_se[k,23]<-fit$beta.se0
+    res_se[k,24:25]<-fit$psi.se1
+    res_CP[k,23]<-1*(1> res[k,23]- c_alpha*res_se[k,23] &1< res[k,23]+ c_alpha*res_se[k,23] )
+    res_CP[k,24]<-1*(1> res[k,24]- c_alpha*res_se[k,24] &1< res[k,24]+ c_alpha*res_se[k,24] )
+    res_CP[k,25]<-1*(1> res[k,25]- c_alpha*res_se[k,25] &1< res[k,25]+ c_alpha*res_se[k,25] )
+    # IVT semi, mis all
+    fit<-idid_semi_forsimu(df,idid_semi_mis_all)
+    res[k,26]<-fit$beta.est0
+    res[k,27:28]<-fit$psi.est1
+    res_se[k,26]<-fit$beta.se0
+    res_se[k,27:28]<-fit$psi.se1
+    res_CP[k,26]<-1*(1> res[k,26]- c_alpha*res_se[k,26] &1< res[k,26]+ c_alpha*res_se[k,26] )
+    res_CP[k,27]<-1*(1> res[k,27]- c_alpha*res_se[k,27] &1< res[k,27]+ c_alpha*res_se[k,27] )
+    res_CP[k,28]<-1*(1> res[k,28]- c_alpha*res_se[k,28] &1< res[k,28]+ c_alpha*res_se[k,28] )
+    
+    #print(res[k,])
+  }
+  write.csv(res,file=paste(case,"_res.csv",sep=""),row.names = FALSE)
+  write.csv(res_se,file=paste(case,"_res_se.csv",sep=""),row.names = FALSE)
+  write.csv(res_CP,file=paste(case,"_res_CP.csv",sep=""),row.names = FALSE)
+}
+
+# replicate Tables 1-2 
+simu("case1",n=1e3,n_rep=3)
+simu("case2")
