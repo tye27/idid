@@ -2,24 +2,22 @@
 % Please edit documentation in R/idid.R
 \name{data_gen}
 \alias{data_gen}
-\title{Simulate dataset}
+\title{Simulate dataset (used in Table 1 of Ye et al. (2021))}
 \usage{
-data_gen(case, n)
+data_gen(n)
 }
 \arguments{
-\item{case}{Simulation scenarios used in Tables 1-2 in Ye et al., (2020)}
-
 \item{n}{Sample size}
 }
 \value{
 A data frame
 }
 \description{
-Simulate dataset
+Simulate dataset (used in Table 1 of Ye et al. (2021))
 }
 \examples{
-df<-data_gen("case1",1e5)
+df<-data_gen(1e5)
 }
 \references{
-Ting Ye, Ashkan Ertefaie, James Flory, Sean Hennessy, and Dylan S. Small (2020). Instrumented Difference-in-Differences.
+Ting Ye, Ashkan Ertefaie, James Flory, Sean Hennessy, and Dylan S. Small (2021). Instrumented Difference-in-Differences.
 }

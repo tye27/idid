@@ -1,12 +1,12 @@
 Package: idid
 Type: Package
 Title: Instrumented Difference-in-Differences
-Version: 0.1.0
+Version: 0.2.0
 Author: Ting Ye
 Maintainer: Ting Ye <tingye1@uw.edu>
 Description: Leverage exogenous randomness in an exposure trend to estimate the average and conditional average treatment effect in the presence of unmeasured confounding. 
 License: GPL (>= 2)
-Imports: gridExtra, rootSolve, truncnorm
+Imports: stats, numDeriv, rootSolve
 Encoding: UTF-8
 LazyData: true
-RoxygenNote: 7.1.1
+RoxygenNote: 7.1.2

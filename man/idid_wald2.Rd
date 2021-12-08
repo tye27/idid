@@ -30,8 +30,10 @@ idid_wald2(mu.y, mu.d, se.y, se.d, tv, zv)
 Two-sample Summary-Data Instrumented DID Wald estimator
 }
 \examples{
-dfa<-data_gen(case="case1",n=1e5) # outcome dataset
-dfb<-data_gen(case="case1",n=1e5) # exposure dataset
+dfa<-data_gen(1e5) # outcome dataset
+dfb<-data_gen(1e5) # exposure dataset
+dfa<-dfa[dfa$x1<=0&dfa$x2<=0,]
+dfb<-dfb[dfb$x1<=0&dfb$x2<=0,]
 res<-data.frame(mu.y=0,mu.d=0, se.y=0, se.d=0, t=c(0,1,0,1),z=c(0,0,1,1))
 for(i in 1:4){
 t<-res$t[i]
@@ -45,5 +47,5 @@ idid_wald2(mu.y=res$mu.y,mu.d=res$mu.d,se.y=res$se.y,se.d=res$se.d,tv=res$t,zv=r
 
 }
 \references{
-Ting Ye, Ashkan Ertefaie, James Flory, Sean Hennessy, and Dylan S. Small (2020). Instrumented Difference-in-Differences.
+Ting Ye, Ashkan Ertefaie, James Flory, Sean Hennessy, and Dylan S. Small (2021). Instrumented Difference-in-Differences.
 }

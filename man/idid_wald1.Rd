@@ -26,9 +26,12 @@ idid_wald1(yv, dv, tv, zv)
 One-sample Instrumented DID Wald estimator
 }
 \examples{
-df<-data_gen("case1",1e5)
-idid_wald1(df$y,df$d,df$t,df$z)
+df<-data_gen(1e5)
+with(df[df$x1<=0 & df$x2<=0,],idid_wald1(y,d,t,z))
+with(df[df$x1<=0 & df$x2>0,],idid_wald1(y,d,t,z))
+
+
 }
 \references{
-Ting Ye, Ashkan Ertefaie, James Flory, Sean Hennessy, and Dylan S. Small (2020). Instrumented Difference-in-Differences.
+Ting Ye, Ashkan Ertefaie, James Flory, Sean Hennessy, and Dylan S. Small (2021). Instrumented Difference-in-Differences.
 }
